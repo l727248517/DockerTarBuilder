@@ -1,0 +1,110 @@
+name: Download Hugging Face Model Files
+
+on:
+  workflow_dispatch:
+    inputs:
+      hf_models:
+        description: '请填写 Hugging Face 模型信息，格式：repo_id:文件名1,文件名2 多个模型用英文逗号分开'
+        required: true
+        default: 'BeichenZhang/LongCLIP-L:longclip-L.pt'
+
+jobs:
+  download_and_package:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install huggingface-hub
+      run: |
+        pip install --upgrade pip
+        pip install "huggingface_hub>=0.26.2"
+
+    - name: Parse inputs and download model files
+      env:
+        HF_MODELS_INPUT: ${{ github.event.inputs.hf_models }}
+        # 如果是私有模型 / 需要登录的模型，在仓库 Settings -> Secrets 里添加 HF_TOKEN
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        set -e
+
+        # 示例输入：BeichenZhang/LongCLIP-L:longclip-L.pt,Qwen/Qwen2-7B:config.json,model.safetensors
+        IFS=',' read -r -a model_entries <<< "$HF_MODELS_INPUT"
+
+        for entry in "${model_entries[@]}"; do
+          repo_id=$(echo "$entry" | cut -d ':' -f 1)
+          files_str=$(echo "$entry" | cut -d ':' -f 2-)
+
+          [ -z "$repo_id" ] && { echo "错误：repo_id 为空"; exit 1; }
+          [ -z "$files_str" ] && { echo "错误：未指定文件列表，repo_id=$repo_id"; exit 1; }
+
+          echo "====== 处理模型：$repo_id ======"
+
+          # 下载指定文件到当前目录下的 repo_id 目录
+          # 使用 hf_hub_download 逐文件下载，支持 token、断点续传等
+          python - <<PY_SCRIPT
+        import os
+        import sys
+        from huggingface_hub import hf_hub_download
+
+        repo_id = os.environ["REPO_ID"]
+        files_str = os.environ["FILES_STR"]
+        token = os.environ.get("HF_TOKEN") or None
+
+        # 按英文逗号拆分文件名
+        filenames = [f.strip() for f in files_str.split(",") if f.strip()]
+        if not filenames:
+            print("错误：文件列表为空，repo_id={}".format(repo_id), file=sys.stderr)
+            sys.exit(1)
+
+        for filename in filenames:
+            print("正在下载：{}/{}".format(repo_id, filename))
+            try:
+                path = hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    local_dir="./{}".format(repo_id.replace("/", "__")),
+                    token=token,
+                    resume_download=True,
+                )
+                print("已下载到：{}".format(path))
+            except Exception as e:
+                print("下载失败：{}/{}，错误：{}".format(repo_id, filename, e), file=sys.stderr)
+                sys.exit(1)
+        PY_SCRIPT
+
+        done
+
+    - name: Create model directory structure for packaging
+      run: |
+        set -e
+        echo "当前下载目录结构："
+        ls -R
+
+        # 为了和你的 Docker 示例风格接近，我们把每个 repo 的文件打成单独 tar
+        for dir in ./*__*; do
+          [ -d "$dir" ] || continue
+          repo_id=$(echo "$dir" | sed 's/^\.//; s/__/\//')
+          tar -cf "${repo_id//\//_}-hf.tar" -C . "$dir"
+        done
+
+    - name: Compress all model TAR files
+      run: tar -czf hf-models.tar.gz *-hf.tar
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: hf-model-files
+        path: hf-models.tar.gz
+        retention-days: 1  # 保留 1 天，可按需改
+
+    - name: Clean up intermediate files
+      run: |
+        rm -rf ./*__*
+        rm -f *-hf.tar
