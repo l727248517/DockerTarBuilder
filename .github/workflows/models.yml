@@ -14,10 +14,10 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6  # 修复 Node 20 弃用警告
+      uses: actions/checkout@v6
 
     - name: Set up Python
-      uses: actions/setup-python@v6  # 修复 Node 20 弃用警告
+      uses: actions/setup-python@v6
       with:
         python-version: '3.11'
 
@@ -36,7 +36,6 @@ jobs:
         IFS=',' read -r -a model_entries <<< "$HF_MODELS_INPUT"
 
         for entry in "${model_entries[@]}"; do
-          # 【修复点】增加 export，将变量导出为环境变量供 Python 读取
           export REPO_ID=$(echo "$entry" | cut -d ':' -f 1)
           export FILES_STR=$(echo "$entry" | cut -d ':' -f 2-)
 
@@ -54,7 +53,6 @@ jobs:
         files_str = os.environ["FILES_STR"]
         token = os.environ.get("HF_TOKEN") or None
 
-        # 按英文逗号拆分文件名
         filenames = [f.strip() for f in files_str.split(",") if f.strip()]
         if not filenames:
             print("错误：文件列表为空，repo_id={}".format(repo_id), file=sys.stderr)
@@ -78,30 +76,23 @@ jobs:
 
         done
 
-    - name: Create model directory structure for packaging
+    - name: Package model files into ZIP
       run: |
         set -e
         echo "当前下载目录结构："
         ls -R
-
-        # 为了和你的 Docker 示例风格接近，我们把每个 repo 的文件打成单独 tar
-        for dir in ./*__*; do
-          [ -d "$dir" ] || continue
-          repo_id=$(echo "$dir" | sed 's/^\.//; s/__/\//')
-          tar -cf "${repo_id//\//_}-hf.tar" -C . "$dir"
-        done
-
-    - name: Compress all model TAR files
-      run: tar -czf hf-models.tar.gz *-hf.tar
+        
+        # 直接将所有下载的模型目录（以 __ 命名的）打包成 hf-models.zip
+        # -r 表示递归包含子目录
+        zip -r hf-models.zip ./*__*
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: hf-model-files
-        path: hf-models.tar.gz
+        path: hf-models.zip
         retention-days: 1  # 保留 1 天，可按需改
 
     - name: Clean up intermediate files
       run: |
         rm -rf ./*__*
-        rm -f *-hf.tar
